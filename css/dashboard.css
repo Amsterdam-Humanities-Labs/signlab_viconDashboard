@@ -1,0 +1,273 @@
+/**
+ * Vicon Dashboard CSS
+ * Custom styles for status colors, date cards, and indicators
+ */
+
+/* Row status colors */
+tr.status-green {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+tr.status-yellow {
+    background-color: #fff3cd;
+    color: #856404;
+}
+
+tr.status-red {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+/* Subdirectory indicators */
+.subdir-present::before {
+    content: '✓';
+    color: #28a745;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+.subdir-missing::before {
+    content: '✗';
+    color: #dc3545;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+.subdir-na::before {
+    content: '–';
+    color: #6c757d;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+/* GLB indicators */
+.glb-present::before {
+    content: '✓';
+    color: #28a745;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+/* Tekst 3D viewer link */
+.tekst-link {
+    color: inherit;
+    text-decoration: underline dotted;
+}
+
+.tekst-link:hover {
+    color: #0d6efd;
+    text-decoration: underline;
+}
+
+.glb-missing::before {
+    content: '✗';
+    color: #dc3545;
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+/* Date cards */
+.date-card {
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border-left: 4px solid #0d6efd !important;
+}
+
+.date-card:hover {
+    background-color: rgba(13, 110, 253, 0.1);
+    transform: translateX(2px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.date-card.active {
+    background-color: rgba(13, 110, 253, 0.2);
+    font-weight: 600;
+    border-left-width: 6px !important;
+}
+
+/* Table styling */
+#liveFeedTable thead th {
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+#liveFeedTable tbody td {
+    vertical-align: middle;
+    font-size: 0.9rem;
+}
+
+/* Sticky header */
+.sticky-top {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+/* Table hover effect - preserve row color */
+.table-hover tbody tr.status-green:hover {
+    background-color: #c3e6cb;
+}
+
+.table-hover tbody tr.status-yellow:hover {
+    background-color: #ffeaa7;
+}
+
+.table-hover tbody tr.status-red:hover {
+    background-color: #f5c6cb;
+}
+
+/* Responsive table container */
+.table-responsive {
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+/* Card styling */
+.card {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Date overview scrollable area */
+#dateOverview {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+/* Custom scrollbar */
+#dateOverview::-webkit-scrollbar,
+.table-responsive::-webkit-scrollbar {
+    width: 8px;
+}
+
+#dateOverview::-webkit-scrollbar-track,
+.table-responsive::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+#dateOverview::-webkit-scrollbar-thumb,
+.table-responsive::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+
+#dateOverview::-webkit-scrollbar-thumb:hover,
+.table-responsive::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+/* Loading spinners */
+.spinner-border {
+    width: 1.5rem;
+    height: 1.5rem;
+}
+
+/* Filter indicator styling */
+#filterIndicator .btn-outline-light {
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+#filterIndicator .btn-outline-light:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+    border-color: white;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .table-responsive {
+        max-height: 50vh;
+    }
+
+    #dateOverview {
+        max-height: 30vh;
+    }
+
+    #liveFeedTable thead th {
+        font-size: 0.75rem;
+        padding: 0.3rem;
+    }
+
+    #liveFeedTable tbody td {
+        font-size: 0.8rem;
+        padding: 0.3rem;
+    }
+}
+
+/* Legend styling */
+.card-body ul {
+    font-size: 0.85rem;
+}
+
+.card-body .badge {
+    font-size: 0.75rem;
+    padding: 0.25em 0.5em;
+}
+
+/* Collapsible file list rows */
+.capture-row.expanded {
+    border-bottom: 2px solid #0d6efd;
+}
+
+.file-list-row {
+    background-color: #f8f9fa;
+    border-left: 4px solid #0d6efd;
+}
+
+.file-list-cell {
+    padding: 0 !important;
+}
+
+.file-list-container {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    margin: 10px;
+}
+
+.subdir-group {
+    border-left: 3px solid #0d6efd;
+    padding-left: 12px;
+}
+
+.subdir-header {
+    background-color: #f8f9fa;
+    padding: 8px 12px;
+    border-radius: 4px;
+}
+
+.file-list {
+    margin-left: 12px;
+}
+
+.file-item {
+    border-bottom: 1px solid #e9ecef;
+    transition: background-color 0.2s;
+}
+
+.file-item:last-child {
+    border-bottom: none;
+}
+
+.file-item:hover {
+    background-color: #f8f9fa;
+}
+
+.file-name {
+    flex: 1;
+    word-break: break-all;
+}
+
+/* Downloadable file links */
+.file-download-link {
+    color: #0d6efd;
+    text-decoration: none;
+}
+
+.file-download-link:hover {
+    text-decoration: underline;
+}
+
+.file-size {
+    white-space: nowrap;
+    margin-left: 10px;
+}
