@@ -1,4 +1,9 @@
 <?php
+
+// signcollect-lib's install-root resolver: sc_path(), sc_dir(), sc_root().
+// Vendored shim - it finds /web/lib/paths.php, or falls back to /web.
+require_once __DIR__ . '/../sc_paths.php';
+
 /**
  * API: Get Mocap Statistics
  * Returns statistics on how many zOg='Zin' entries have has_mocap set
@@ -7,7 +12,7 @@
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 
-require_once('/web/mysql_config.php');
+require_once(sc_path('mysql_config.php'));
 
 try {
     $conn = new mysqli($servername, $username, $password, $database);
