@@ -42,7 +42,7 @@ try {
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
         if (!$row) {
-            throw new Exception("No capture named " . $file);
+            throw new Exception("No capture named " . $file, 404);
         }
         $capture_id = $row['capture_id'];
     }
@@ -97,7 +97,8 @@ try {
     ], JSON_UNESCAPED_SLASHES);
 
 } catch (Exception $e) {
-    http_response_code(500);
+    // 404 for an unknown capture, 500 for anything that actually went wrong.
+    http_response_code($e->getCode() === 404 ? 404 : 500);
     echo json_encode([
         'success' => false,
         'error' => $e->getMessage(),
