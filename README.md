@@ -6,7 +6,6 @@ A live dashboard for Vicon recording sessions. It shows which recordings arrived
 - Row colours: green when `obs`, `shogun_live`, `unreal`, `livelink` and `metadata` are all present and no file is still growing. Yellow when all five are present but files are still growing. Red when one is missing. `shogun_post`, GLB and the `unreal/CC` and `unreal/Vicon` columns (from 2026-02-17) are shown but do not change the colour.
 - `livelink` counts as present when `unreal` holds its CSVs. Files that stay on the Vicon PC show as present but have no download link.
 - Read-only JSON in `api/`: `get_live_feed.php`, `get_capture_files.php`, `get_date_overview.php`, `get_mocap_stats.php`.
-- Read `CLAUDE.md` before you change the code.
 
 ## Where it runs
 Core server: `/web/viconDashboard`, https://signcollect.nl/viconDashboard/.
