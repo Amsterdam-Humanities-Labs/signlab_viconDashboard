@@ -297,8 +297,9 @@ function createCaptureRow(capture) {
     }).join('');
 
     let tekstCell;
-    const viewerUrl = `https://signcollect.nl/sCApp/3DViewer_viconDashboard.html?file=${encodeURIComponent(capture.recording_dir)}` +
-        (capture.obs_filename ? `&obs=${encodeURIComponent(capture.obs_filename)}` : '');
+    // 3d-viewer.html (this repo): the capture's GLB on the 3DAnn3 Babylon CC avatar.
+    const viewerUrl = `3d-viewer.html?capture_id=${encodeURIComponent(capture.capture_id)}` +
+        `&file=${encodeURIComponent(capture.recording_dir)}`;
 
     if (capture.tekst && capture.has_glb) {
         tekstCell = `<a href="${viewerUrl}" target="_blank" onclick="event.stopPropagation();" class="tekst-link" title="Open 3D Viewer">${escapeHtml(capture.tekst)}</a>`;

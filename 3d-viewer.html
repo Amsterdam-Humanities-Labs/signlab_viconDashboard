@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="/userProtect.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D Viewer - Vicon Dashboard</title>
+  <!-- Same Babylon.js build as the 3DAnn3 editor (signlab_annotation-editors) -->
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #1F242B; color: #e6e6e6;
+                 font-family: system-ui, sans-serif; overflow: hidden; }
+    #renderCanvas { width: 100%; height: calc(100% - 56px); display: block; outline: none; touch-action: none; }
+    #bar { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px; box-sizing: border-box; background: #14181d; }
+    #bar button { background: #2d6cdf; color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
+    #bar button:disabled { background: #555; cursor: default; }
+    #seek { flex: 1; min-width: 60px; }
+    #time { font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
+    #zinDisplay { position: absolute; top: 12px; left: 16px; right: 16px; font-size: 15px; text-shadow: 0 1px 2px #000; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="zinDisplay">Loading...</div>
+  <canvas id="renderCanvas"></canvas>
+  <div id="bar">
+    <button id="playBtn" disabled>Play</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" disabled />
+    <span id="time">0.00 / 0.00</span>
+    <button id="leftHandBtn" disabled>Linkerhand</button>
+    <button id="rightHandBtn" disabled>Rechterhand</button>
+  </div>
+  <script>
+    // 3D viewer for one Vicon capture: the capture's animation GLB on the Babylon
+    // CC avatar (PalmerPolo), with the same scene, lighting, retargeting and
+    // shape-key code as the 3DAnn3 editor. The block between COPIED FROM 3DAnn3
+    // markers is copied from signlab_annotation-editors 3DAnn3/zin/3DAnn3.html;
+    // keep the two in sync. Usage: 3d-viewer.html?capture_id=<id> or ?file=<recording_dir>
+
+    let engine = null;
+    let scene = null;
+    let currentAnimationGroup = null;
+    let animationFrameRate = 30;
+    let animationFromFrame = 0;
+    let animationToFrame = 0;
+    const zinDisplayElement = document.getElementById('zinDisplay');
+
+    // ===== COPIED FROM 3DAnn3 (state + render config) =====
+    // Character controller state (from blendAnims pattern)
+    let character = null;           // Base mesh result
+    let morphTargetManagers = [];   // Morph target managers from base mesh
+    let skeleton = null;            // Skeleton from base mesh
+    let baseCharacterLoaded = false;
+    let camera = null;              // ArcRotateCamera (module scope for hand focus)
+    let avatarRoot = null;          // TransformNode wrapping the base character
+    let lightingRig = null;         // Result of setupLighting()
+    let backdropMaterial = null;    // Backdrop PBR material (for the colour UI)
+    let trackedHand = null;         // "left" | "right" | null - hand the camera follows
+
+    // Base character URL - CC (Character Creator) avatar, same one the babyloncc/dist viewer uses.
+    const BASE_CHARACTER_URL = "/animMIDI/babyloncc/dist/PalmerPolo1024uastc.glb";
+    // CC helper meshes that should never render, and the metre→centimetre position scale
+    // for animations. Mirrors the proven CC retargeting pipeline in babyloncc/dist/index.html.
+    const EXCLUDED = ["cc_base_eyeocclusion","cc_base_tear_ducts","cc_base_tearline",
+      "chin_curtain_sparse","male_bushy","mustache_horseshoe","stubble_neck",
+      "cc_base_eye_primitive1","cc_base_eye_primitive3"];
+    // Position unit scale. The legacy fbx2gltf pipeline exports bone positions in
+    // METRES against a centimetre CC skeleton, so its keys need x100. The
+    // FBXtoGLBCompression pipeline (Blender + fix_anim_skeleton) already emits
+    // CENTIMETRES with a 0.01 scene-root scale, so its keys must NOT be rescaled.
+    // detectPosScale() picks the right factor per animation; ?posScale= overrides.
+    let POS_SCALE = 100;
+    const POS_SCALE_METRES = 100;   // legacy fbx2gltf GLBs
+    const POS_SCALE_CM = 1;         // FBXtoGLBCompression GLBs
+    // A human skeleton in metres never exceeds a few units of translation; in
+    // centimetres it is in the tens-to-hundreds. 10 sits safely between them.
+    const CM_DETECT_THRESHOLD = 10;
+
+    // The avatar's "root" bone is not animation data - it is a fixed coordinate
+    // space correction (-90 deg X) that maps the CC bone space (Z-up) into the
+    // scene (Y-up). Nothing in a mocap clip should ever overwrite it.
+    //
+    // This matters for FBXtoGLBCompression GLBs specifically: they contain TWO
+    // nodes named "root" - the scene root (identity rotation, 0.01 scale) and
+    // the corrective joint that fix_anim_skeleton.mjs inserts. Retargeting
+    // resolves by name, so the scene root's identity rotation lands on the
+    // avatar's corrective bone, cancels the -90 deg X, and tips the whole
+    // character out of the camera's framing (it looks like the avatar vanished).
+    // Legacy fbx2gltf GLBs are unaffected: their scene root is "RootNode" and
+    // they carry no channels on "root" at all, so skipping it is a no-op there.
+    const ROOT_BONE_NAMES = new Set(['root']);
+
+    // ============================================
+    // BABYLONCC STUDIO-RENDER CONFIG
+    // Ported from github.com/J-Andersen-UvA/BabylonCC (src/config/*).
+    // Asset URLs are absolute so they resolve next to the base character.
+    // ============================================
+    const RENDER_CONFIG = {
+      hardwareScalingLevel: 1,
+      clearColor: "#1F242BFF",
+      imageProcessing: {
+        toneMappingEnabled: true,
+        exposure: 1.0,
+        contrast: 1.0,
+      },
+      lighting: {
+        // NOTE: served as .envbin (not .env) because Apache denies *.env files (they
+        // usually hold secrets). Babylon is told the real format via forcedExtension below.
+        environmentUrl: "/animMIDI/babyloncc/dist/environment.envbin",
+        iblIntensity: 0.35,
+        sunIntensity: 1.0,
+        sunDirection: { x: -0.4, y: -1.0, z: -0.3 },
+        hemiFillEnabled: true,
+        hemiIntensity: 0.25,
+        hemiGroundColor: "#262626",
+        hemiDiffuseColor: "#FFFFFF",
+        hemiSpecularColor: "#333333",
+        studioThreePoint: {
+          enabled: true,
+          target: { x: 0, y: 1.25, z: 0 },
+          key:  { position: { x: -2.4, y: 3.2, z: 2.8 }, intensity: 70, color: "#ffe5ba", angle: 0.85, exponent: 1.8 },
+          fill: { position: { x:  2.6, y: 2.1, z: 2.0 }, intensity: 50, color: "#DDEBFF", angle: 1.1,  exponent: 1.3 },
+          rim:  { position: { x:  1.5, y: 2.7, z: -2.8 }, intensity: 30, color: "#E8F5FF", angle: 0.75, exponent: 2.2 },
+        },
+      },
+      shadows: {
+        mapSize: 2048,
+        usePercentageCloserFiltering: true,
+        studio: { enabled: true, mapSize: 1024, key: true, fill: false, rim: true },
+      },
+    };
+
+    // Camera framing focuses on a chosen bone (CC spine), falling back to a fixed target.
+    const AVATAR_CAMERA_CONFIG = {
+      focusBoneNames: ["spine_05"],
+      fallbackTarget: { x: 0, y: 1.35, z: 0 },
+      targetOffset: { x: 0, y: 0.05, z: 0 },
+      alpha: Math.PI / 2,
+      beta: 1.6,
+      radius: 0.9725,  // user-tuned zoom distance (16:9 canvas framing)
+      // Optional manual yaw offset (degrees) applied AFTER the automatic eye-facing
+      // orientation. Leave at 0; only set this if the auto-orientation is consistently off.
+      facingYDegrees: 0,
+    };
+
+    // Avatar material tuning (matte default is commented; specular studio preset active).
+    const AVATAR_MATERIAL_CONFIG = {
+      specularIntensity: 0.15,
+      environmentIntensity: 0.25,
+      roughness: 0.48,
+      metallic: 0,
+    };
+    const AVATAR_MATERIAL_RULES = {
+      alphaBlendRules: [
+        { nameIncludes: ["hair"], backFaceCulling: true, renderingGroupId: 0 },
+        { nameIncludes: ["eyelash"] },
+      ],
+      opaqueFallback: true,
+      roughnessOverrides: [
+        { nameIncludes: ["ss_slash_neck_top"], minimumRoughness: 0.64 },
+        { nameIncludes: ["beard", "brow", "female_angled"], minimumRoughness: 0.6 },
+      ],
+      scalp: { nameIncludes: ["scalp"], renderingGroupId: 0, alphaIndex: 0 },
+    };
+
+    // Hand-focus button targets (CC hand bones).
+    const HAND_TRACKING = {
+      leftBoneNames: ["hand_l"],
+      rightBoneNames: ["hand_r"],
+      focusRadius: 1.35,
+      targetOffset: { x: 0, y: 0, z: 0 },
+    };
+
+    // Small helpers shared by the ported modules
+    const vec3FromConfig = (v) => new BABYLON.Vector3(v.x, v.y, v.z);
+    // ===== END COPIED FROM 3DAnn3 (state + render config) =====
+
+    // ===== COPIED FROM 3DAnn3 (scene, lighting, avatar, retargeting, shape keys) =====
+    // BABYLON.JS SCENE INITIALIZATION
+    // ============================================
+
+    // Disable auto-play on GLB load - MUST be set before any loading
+    BABYLON.SceneLoader.OnPluginActivatedObservable.add(function(loader) {
+      if (loader.name === "gltf") {
+        loader.animationStartMode = BABYLON.GLTFLoaderAnimationStartMode.NONE;
+      }
+    });
+
+    // ============================================
+    // STUDIO LIGHTING RIG (ported from BabylonCC src/babylon/lighting.ts)
+    // Environment IBL + ACES tone mapping + sun shadows + optional hemi fill
+    // + three-point studio spotlights. Returns helpers to register shadow casters.
+    // ============================================
+    function setupLighting(scene, opts) {
+      const cfg = RENDER_CONFIG;
+      const L = cfg.lighting;
+
+      scene.environmentIntensity = L.iblIntensity;
+      scene.imageProcessingConfiguration.toneMappingEnabled = cfg.imageProcessing.toneMappingEnabled;
+      scene.imageProcessingConfiguration.toneMappingType = BABYLON.ImageProcessingConfiguration.TONEMAPPING_ACES;
+      scene.imageProcessingConfiguration.exposure = cfg.imageProcessing.exposure;
+      scene.imageProcessingConfiguration.contrast = cfg.imageProcessing.contrast;
+
+      // Image-based lighting from a prefiltered .env (ground projection off, so no skybox)
+      let environmentTexture;
+      if (L.environmentUrl) {
+        // forcedExtension ".env" so Babylon parses it as an environment texture even though
+        // the file is served with a .envbin extension (Apache blocks literal *.env).
+        environmentTexture = BABYLON.CubeTexture.CreateFromPrefilteredData(L.environmentUrl, scene, ".env");
+        environmentTexture.onLoadObservable.addOnce(() => {
+          scene.environmentTexture = environmentTexture;
+          console.log("[Lighting] environment ready");
+        });
+      }
+
+      // Key directional "sun" with the main shadow generator
+      const sun = new BABYLON.DirectionalLight("sun", vec3FromConfig(L.sunDirection).normalize(), scene);
+      sun.intensity = L.sunIntensity;
+      sun.position = new BABYLON.Vector3(50, 80, 50);
+      sun.shadowMinZ = 0.1;
+      sun.shadowMaxZ = 250;
+
+      const makeShadowGen = (light, mapSize) => {
+        const gen = new BABYLON.ShadowGenerator(mapSize, light);
+        gen.usePercentageCloserFiltering = cfg.shadows.usePercentageCloserFiltering;
+        gen.filteringQuality = BABYLON.ShadowGenerator.QUALITY_HIGH;
+        return gen;
+      };
+
+      const shadowGenerator = makeShadowGen(sun, cfg.shadows.mapSize);
+
+      // Hemispheric fill
+      let hemi;
+      if (L.hemiFillEnabled) {
+        hemi = new BABYLON.HemisphericLight("hemiFill", new BABYLON.Vector3(0, 1, 0), scene);
+        hemi.intensity = L.hemiIntensity;
+        hemi.groundColor = BABYLON.Color3.FromHexString(L.hemiGroundColor);
+        hemi.diffuse = BABYLON.Color3.FromHexString(L.hemiDiffuseColor);
+        hemi.specular = BABYLON.Color3.FromHexString(L.hemiSpecularColor);
+      }
+
+      // Three-point studio spotlights
+      const studioLights = [];
+      const studioShadowGenerators = [];
+      const tp = L.studioThreePoint;
+
+      const createStudioLight = (name, lo, target, castsShadow) => {
+        const pos = vec3FromConfig(lo.position);
+        const dir = target.subtract(pos).normalize();
+        const spot = new BABYLON.SpotLight(name, pos, dir, lo.angle, lo.exponent, scene);
+        spot.intensity = lo.intensity;
+        spot.diffuse = BABYLON.Color3.FromHexString(lo.color);
+        spot.specular = BABYLON.Color3.FromHexString(lo.color);
+        studioLights.push(spot);
+        if (cfg.shadows.studio.enabled && castsShadow) {
+          studioShadowGenerators.push(makeShadowGen(spot, cfg.shadows.studio.mapSize));
+        }
+      };
+
+      if (tp && tp.enabled !== false) {
+        const target = vec3FromConfig(tp.target);
+        createStudioLight("studioKey", tp.key, target, cfg.shadows.studio.key);
+        createStudioLight("studioFill", tp.fill, target, cfg.shadows.studio.fill);
+        createStudioLight("studioRim", tp.rim, target, cfg.shadows.studio.rim);
+      }
+
+      const addShadowCaster = (mesh) => {
+        shadowGenerator.addShadowCaster(mesh);
+        studioShadowGenerators.forEach(g => g.addShadowCaster(mesh));
+      };
+      const setShadowReceiver = (mesh, receive) => { mesh.receiveShadows = receive; };
+
+      return { sun, hemi, shadowGenerator, studioShadowGenerators, environmentTexture, addShadowCaster, setShadowReceiver };
+    }
+
+    // ============================================
+    // BACKDROP (ported from BabylonCC src/babylon/loadBackdrop.ts)
+    // Loads Backdrop.glb behind the avatar, applies a matte grey PBR material that
+    // receives shadows. Stores the material so the colour UI can recolour it live.
+    // ============================================
+    async function loadBackdrop(scene) {
+      const result = await BABYLON.SceneLoader.ImportMeshAsync("", "/animMIDI/babyloncc/dist/", "Backdrop.glb", scene);
+      const backdropRoot = new BABYLON.TransformNode("Backdrop", scene);
+      const mat = new BABYLON.PBRMaterial("Backdrop_Matte_Grey", scene);
+      mat.albedoColor = BABYLON.Color3.FromHexString("#36383b");
+      mat.roughness = 0.92;
+      mat.metallic = 0;
+      mat.specularIntensity = 0.18;
+      mat.environmentIntensity = 0.18;
+      mat.backFaceCulling = false;
+
+      const importedNodes = [...result.transformNodes, ...result.meshes];
+      const importedSet = new Set(importedNodes);
+      importedNodes
+        .filter(n => !n.parent || !importedSet.has(n.parent))
+        .forEach(n => { n.parent = backdropRoot; });
+
+      result.meshes.forEach(mesh => {
+        mesh.alwaysSelectAsActiveMesh = true;
+        mesh.receiveShadows = true;
+        mesh.material = mat;
+      });
+
+      backdropMaterial = mat;
+      console.log("[Backdrop] imported meshes:", result.meshes.length);
+      return { root: backdropRoot, material: mat };
+    }
+
+    // ============================================
+    // CAMERA / HAND FOCUS (ported from BabylonCC src/babylon/createScene.ts)
+    // ============================================
+    function boneTransformNode(bone) {
+      if (bone.getTransformNode) {
+        const n = bone.getTransformNode();
+        if (n) return n;
+      }
+      return bone._linkedTransformNode || null;
+    }
+
+    function findFocusTargetByNames(scene, avatarRoot, names) {
+      const focusNames = names.map(n => n.toLowerCase());
+      for (const sk of scene.skeletons) {
+        for (const bone of sk.bones) {
+          if (!focusNames.includes(bone.name.toLowerCase())) continue;
+          const node = boneTransformNode(bone);
+          if (node) return { position: node.getAbsolutePosition(), source: `bone:${bone.name}` };
+        }
+      }
+      const descendants = avatarRoot ? avatarRoot.getDescendants(false) : [];
+      const focusNode = descendants.find(n => focusNames.includes(n.name.toLowerCase()));
+      if (focusNode && focusNode.getAbsolutePosition) {
+        return { position: focusNode.getAbsolutePosition(), source: `node:${focusNode.name}` };
+      }
+      return null;
+    }
+
+    function focusCameraOnAvatar(scene, avatarRoot) {
+      const cam = scene.activeCamera;
+      if (!cam) return;
+      const ft = findFocusTargetByNames(scene, avatarRoot, AVATAR_CAMERA_CONFIG.focusBoneNames);
+      const target = ft ? ft.position : vec3FromConfig(AVATAR_CAMERA_CONFIG.fallbackTarget);
+      const finalTarget = target.add(vec3FromConfig(AVATAR_CAMERA_CONFIG.targetOffset));
+      cam.setTarget(finalTarget);
+      cam.alpha = AVATAR_CAMERA_CONFIG.alpha;
+      cam.beta = AVATAR_CAMERA_CONFIG.beta;
+      cam.radius = AVATAR_CAMERA_CONFIG.radius;
+      console.log("[Camera] focused:", ft ? ft.source : "fallback", finalTarget.toString());
+    }
+
+    function focusCameraOnAvatarBone(scene, avatarRoot, boneNames, options) {
+      options = options || {};
+      const cam = scene.activeCamera;
+      if (!cam) return false;
+      const ft = findFocusTargetByNames(scene, avatarRoot, boneNames);
+      if (!ft) {
+        if (!options.silent) console.warn("[Camera] hand focus target not found:", boneNames);
+        return false;
+      }
+      const targetOffset = options.targetOffset ? vec3FromConfig(options.targetOffset) : BABYLON.Vector3.Zero();
+      const finalTarget = ft.position.add(targetOffset);
+      cam.setTarget(finalTarget);
+      cam.alpha = options.preserveOrbit ? cam.alpha : AVATAR_CAMERA_CONFIG.alpha;
+      cam.beta = options.preserveOrbit ? cam.beta : AVATAR_CAMERA_CONFIG.beta;
+      if (options.radius != null) cam.radius = options.radius;
+      if (!options.silent) console.log("[Camera] hand focused:", ft.source, finalTarget.toString());
+      return true;
+    }
+
+    // ============================================
+    // EYE-FACING ORIENTATION
+    // Computes the direction the avatar's eyes actually look (from mesh + head-bone
+    // geometry) and rotates the avatar root so that direction points at the camera.
+    // Continuous (not 90°-snapped) and self-correcting, so it works regardless of how
+    // the GLB happens to import.
+    // ============================================
+    function groundDir(v) {
+      const g = new BABYLON.Vector3(v.x, 0, v.z);
+      const len = g.length();
+      return len < 1e-5 ? null : g.scaleInPlace(1 / len);
+    }
+
+    function getHeadBonePosition(scene) {
+      const names = new Set(["head", "cc_base_head", "cc_base_headnode", "facialbone_head"]);
+      for (const sk of scene.skeletons) {
+        for (const b of sk.bones) {
+          if (!names.has(b.name.toLowerCase())) continue;
+          const node = boneTransformNode(b);
+          if (node) return node.getAbsolutePosition();
+        }
+      }
+      return null;
+    }
+
+    // Returns { center, positions } of the (world-space) eye mesh centres, or null.
+    function getEyeGeometry(avatarRoot) {
+      const eyeMeshes = avatarRoot.getChildMeshes(false).filter(m => {
+        const n = m.name.toLowerCase();
+        return m.isEnabled() && n.includes("eye")
+          && !n.includes("eyelash") && !n.includes("occlusion") && !n.includes("tear");
+      });
+      if (!eyeMeshes.length) return null;
+
+      const positions = [];
+      const center = BABYLON.Vector3.Zero();
+      for (const m of eyeMeshes) {
+        m.computeWorldMatrix(true);
+        const c = m.getBoundingInfo().boundingBox.centerWorld;
+        positions.push(c);
+        center.addInPlace(c);
+      }
+      center.scaleInPlace(1 / eyeMeshes.length);
+      return { center, positions };
+    }
+
+    // Best-effort horizontal "forward" the eyes look along, in world space.
+    function computeEyeForward(scene, avatarRoot) {
+      const eyes = getEyeGeometry(avatarRoot);
+      if (!eyes) return null;
+      const headPos = getHeadBonePosition(scene);
+
+      // Primary: eyes sit in FRONT of the head joint, so eyeCenter - headPos is forward.
+      if (headPos) {
+        const f = groundDir(eyes.center.subtract(headPos));
+        if (f) return f;
+      }
+
+      // Fallback: forward is perpendicular to the inter-eye (ear-to-ear) axis.
+      if (eyes.positions.length >= 2) {
+        const interEye = groundDir(eyes.positions[1].subtract(eyes.positions[0]));
+        if (interEye) {
+          let f = groundDir(new BABYLON.Vector3(interEye.z, 0, -interEye.x)); // rotate 90° in ground plane
+          if (f && headPos) {
+            const ref = groundDir(eyes.center.subtract(headPos));
+            if (ref && BABYLON.Vector3.Dot(f, ref) < 0) f.scaleInPlace(-1);
+          }
+          if (f) return f;
+        }
+      }
+      return null;
+    }
+
+    // Rotate the avatar so its eye-forward points at the camera. Returns true on success.
+    function orientAvatarEyesToCamera(scene, avatarRoot) {
+      const cam = scene.activeCamera;
+      if (!cam || !avatarRoot) return false;
+
+      avatarRoot.computeWorldMatrix(true);
+      const forward = computeEyeForward(scene, avatarRoot);
+      if (!forward) {
+        console.warn("[Avatar] could not compute eye-facing direction");
+        return false;
+      }
+
+      const eyes = getEyeGeometry(avatarRoot);
+      const pivot = eyes ? eyes.center : avatarRoot.getAbsolutePosition();
+      const toCamera = groundDir(cam.position.subtract(pivot));
+      if (!toCamera) return false;
+
+      // Signed yaw (Babylon left-handed convention) to rotate `forward` onto `toCamera`.
+      const crossY = forward.x * toCamera.z - forward.z * toCamera.x;
+      const yaw = Math.atan2(crossY, BABYLON.Vector3.Dot(forward, toCamera));
+
+      avatarRoot.rotate(BABYLON.Axis.Y, yaw, BABYLON.Space.WORLD);
+      avatarRoot.computeWorldMatrix(true);
+      console.log("[Avatar] eyes->camera yaw:", BABYLON.Tools.ToDegrees(yaw).toFixed(1) + "°");
+      return true;
+    }
+
+    // ============================================
+    // ORIENTATION SNAP (ported from BabylonCC src/babylon/orientAvatarToCamera.ts)
+    // Rotates the avatar root by the nearest 90° so it faces the camera. Self-no-ops
+    // when already facing, so it is safe for this fixed-camera tool.
+    // ============================================
+    function snapAvatarToCameraInRightAngles(scene, avatarRoot) {
+      const RIGHT_ANGLE = Math.PI / 2;
+      const HEAD_BONE_NAMES = ["head", "cc_base_head", "cc_base_headnode"];
+      const camera = scene.activeCamera;
+      if (!camera || !avatarRoot) return false;
+
+      const projectToGround = v => new BABYLON.Vector3(v.x, 0, v.z);
+      const normalizeGround = v => {
+        const g = projectToGround(v);
+        const len = g.length();
+        return len < 0.0001 ? null : g.scale(1 / len);
+      };
+      const signedYaw = (from, to) => {
+        const crossY = from.x * to.z - from.z * to.x;
+        return Math.atan2(crossY, BABYLON.Vector3.Dot(from, to));
+      };
+      const findHeadPosition = () => {
+        const wanted = new Set(HEAD_BONE_NAMES);
+        for (const sk of scene.skeletons) {
+          for (const bone of sk.bones) {
+            if (!wanted.has(bone.name.toLowerCase())) continue;
+            const node = boneTransformNode(bone);
+            if (node) return node.getAbsolutePosition();
+          }
+        }
+        return null;
+      };
+      const findEyeCenter = () => {
+        const eyeMeshes = avatarRoot.getChildMeshes(false).filter(m => {
+          const n = m.name.toLowerCase();
+          return m.isEnabled() && n.includes("eye") && !n.includes("eyelash");
+        });
+        if (!eyeMeshes.length) return null;
+        const center = BABYLON.Vector3.Zero();
+        for (const m of eyeMeshes) {
+          m.computeWorldMatrix(true);
+          center.addInPlace(m.getBoundingInfo().boundingBox.centerWorld);
+        }
+        return center.scale(1 / eyeMeshes.length);
+      };
+      const inferForward = () => {
+        const head = findHeadPosition();
+        const eye = findEyeCenter();
+        if (head && eye) {
+          const f = normalizeGround(head.subtract(eye));
+          if (f) return { forward: f, source: "eyes-to-head" };
+        }
+        avatarRoot.computeWorldMatrix(true);
+        const f = normalizeGround(BABYLON.Vector3.TransformNormal(BABYLON.Vector3.Forward(), avatarRoot.getWorldMatrix()));
+        return f ? { forward: f, source: "avatar-forward-axis" } : null;
+      };
+
+      avatarRoot.computeWorldMatrix(true);
+      const toCamera = normalizeGround(camera.position.subtract(avatarRoot.getAbsolutePosition()));
+      const inferred = inferForward();
+      if (!toCamera || !inferred) {
+        console.warn("[Avatar] could not infer orientation for camera-facing snap");
+        return false;
+      }
+      const rawYaw = signedYaw(inferred.forward, toCamera);
+      const snappedYaw = Math.round(rawYaw / RIGHT_ANGLE) * RIGHT_ANGLE;
+      if (Math.abs(snappedYaw) < 0.0001) {
+        console.log("[Avatar] camera-facing snap: already facing camera", inferred.source);
+        return true;
+      }
+      avatarRoot.rotate(BABYLON.Axis.Y, snappedYaw, BABYLON.Space.WORLD);
+      avatarRoot.computeWorldMatrix(true);
+      console.log("[Avatar] camera-facing snap:", inferred.source, "deg:", BABYLON.Tools.ToDegrees(snappedYaw));
+      return true;
+    }
+
+    async function initializeBabylonScene() {
+      const canvas = document.getElementById("renderCanvas");
+
+      engine = new BABYLON.Engine(canvas, true, {
+        preserveDrawingBuffer: true,
+        stencil: true,
+        antialias: true,
+        powerPreference: "high-performance"
+      });
+      engine.setHardwareScalingLevel(RENDER_CONFIG.hardwareScalingLevel);
+
+      scene = new BABYLON.Scene(engine);
+      scene.clearColor = BABYLON.Color4.FromHexString(RENDER_CONFIG.clearColor);
+
+      // Enable animation interpolation for smooth seeking
+      BABYLON.Animation.AllowMatricesInterpolation = true;
+
+      // Studio lighting rig (env IBL + sun shadows + hemi fill + three-point spots).
+      // Replaces the old flat hemispheric + directional setup.
+      lightingRig = setupLighting(scene);
+
+      // Add ArcRotateCamera - framed to show hips to head (framing later refined by
+      // focusCameraOnAvatar once the avatar's spine bone is available)
+      camera = new BABYLON.ArcRotateCamera(
+        "camera",
+        Math.PI / 2,      // alpha: horizontal angle (front view)
+        Math.PI / 2,      // beta: vertical angle (straight on)
+        1.2,              // radius: distance from target (closer for tighter framing)
+        new BABYLON.Vector3(0, 1.3, 0),  // target: upper chest/neck area
+        scene
+      );
+      camera.attachControl(canvas, true);
+      camera.wheelDeltaPercentage = 0.015;
+      camera.panningSensibility = 0;
+      camera.minZ = 0.01;  // Fix near clipping when zoomed in close
+      camera.lowerRadiusLimit = 0.5;
+      camera.upperRadiusLimit = 10;
+
+      // Hand-follow loop: while a hand is locked, keep the camera aimed at it
+      // (preserving the user's current orbit). Mirrors BabylonCC App.tsx.
+      scene.onBeforeRenderObservable.add(() => {
+        if (!trackedHand || !avatarRoot) return;
+        const names = trackedHand === "left" ? HAND_TRACKING.leftBoneNames : HAND_TRACKING.rightBoneNames;
+        focusCameraOnAvatarBone(scene, avatarRoot, names, {
+          targetOffset: HAND_TRACKING.targetOffset,
+          preserveOrbit: true,
+          silent: true,
+        });
+      });
+
+      // Run render loop
+      engine.runRenderLoop(() => {
+        scene.render();
+      });
+
+      // Handle window resize
+      window.addEventListener("resize", () => {
+        engine.resize();
+      });
+
+      // ---- Dev helper: tune framing live, then copy it back to the config. ----
+      // Orbit/zoom the avatar to taste, then in the browser console run: dumpView()
+      // Paste the printed block to lock it in as AVATAR_CAMERA_CONFIG.
+      window.camera = camera;
+      window.scene = scene;
+      window.dumpView = () => {
+        const t = camera.getTarget();
+        const view = {
+          alpha: +camera.alpha.toFixed(4),
+          beta: +camera.beta.toFixed(4),
+          radius: +camera.radius.toFixed(4),
+          target: { x: +t.x.toFixed(4), y: +t.y.toFixed(4), z: +t.z.toFixed(4) },
+          canvasAspect: +(engine.getRenderWidth() / engine.getRenderHeight()).toFixed(4),
+        };
+        console.log("[View] copy this to me:\n" + JSON.stringify(view, null, 2));
+        return view;
+      };
+
+      console.log("Babylon.js scene initialized");
+    }
+
+    // ============================================
+    // CHARACTER CONTROLLER (from blendAnims pattern)
+    // ============================================
+
+    // Helper: Focus camera on mesh bounds
+    function focusCameraOnMesh(meshes) {
+      if (!meshes || meshes.length === 0) return;
+
+      let min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
+      let max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
+
+      meshes.forEach(mesh => {
+        if (mesh.getBoundingInfo()) {
+          const meshMin = mesh.getBoundingInfo().boundingBox.minimumWorld;
+          const meshMax = mesh.getBoundingInfo().boundingBox.maximumWorld;
+          min = BABYLON.Vector3.Minimize(min, meshMin);
+          max = BABYLON.Vector3.Maximize(max, meshMax);
+        }
+      });
+
+      const center = BABYLON.Vector3.Center(min, max);
+      const camera = scene.activeCamera;
+      if (camera) {
+        camera.setTarget(center);
+        const size = max.subtract(min);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        camera.radius = maxDim * 2;
+        camera.lowerRadiusLimit = maxDim * 0.5;
+        camera.upperRadiusLimit = maxDim * 4;
+      }
+    }
+
+    // Helper: Get morph target index by name
+    function getMorphTargetIndex(morphTargetManager, targetName) {
+      if (!morphTargetManager) return -1;
+      for (let i = 0; i < morphTargetManager.numTargets; i++) {
+        if (morphTargetManager.getTarget(i).name === targetName) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    // Helper: Normalize bone name for matching (handle different naming conventions)
+    function normalizeBoneName(name) {
+      if (!name) return name;
+      // Strip common prefixes like "Armature|"
+      if (name.includes("|")) {
+        return name.split("|").pop();
+      }
+      // Handle mixamo prefix
+      if (name.startsWith("mixamorig:")) {
+        return name.replace("mixamorig:", "");
+      }
+      return name;
+    }
+
+    // Key function: Retarget animation to base character (from blendAnims)
+    function retargetAnimWithBlendshapes(animGroup, cloneName) {
+      let curMTM = 0;
+      let morphName = "";
+      let morphIndex = -1;
+      let mtm = null;
+      let boneMatches = 0;
+      let morphMatches = 0;
+      let noMatches = 0;
+      let rootSkipped = 0;
+
+      console.log("=== Starting Retarget ===");
+      console.log("Skeleton:", skeleton ? "loaded" : "NOT LOADED");
+      console.log("Skeleton bones count:", skeleton?.bones?.length || 0);
+      console.log("Morph target managers:", morphTargetManagers.length);
+
+      // Log first 5 bone names from skeleton for reference
+      if (skeleton && skeleton.bones) {
+        console.log("First 5 skeleton bone names:", skeleton.bones.slice(0, 5).map(b => b.name));
+        // Check linkedTransformNode status
+        const bonesWithLinks = skeleton.bones.filter(b => b._linkedTransformNode).length;
+        console.log(`Bones with linkedTransformNode: ${bonesWithLinks}/${skeleton.bones.length}`);
+        if (bonesWithLinks === 0) {
+          console.error("CRITICAL: No bones have _linkedTransformNode - retargeting will fail!");
+        }
+      }
+
+      // Analyze source animation
+      const boneAnims = animGroup.targetedAnimations.filter(ta =>
+        ta.animation?.targetProperty !== 'influence');
+      const morphAnims = animGroup.targetedAnimations.filter(ta =>
+        ta.animation?.targetProperty === 'influence');
+      console.log(`Source animation: ${boneAnims.length} bone anims, ${morphAnims.length} morph anims`);
+
+      if (boneAnims.length > 0) {
+        console.log("First 5 bone animation targets:", boneAnims.slice(0, 5).map(ta => ta.target?.name));
+      } else {
+        console.log("First 5 animation targets:", animGroup.targetedAnimations.slice(0, 5).map(ta => ta.target?.name));
+      }
+
+      // Resolve a source animation target to a node on the base character.
+      // Returns null when there's no match so we can SKIP it. Adding a
+      // null-target animation (which AnimationGroup.clone does) crashes Babylon's
+      // RuntimeAnimation ("Cannot read properties of null (reading 'position')")
+      // the moment the group is started/seeked — exactly what broke timeline
+      // hover after the animation character was switched.
+      const resolveTarget = (target) => {
+        if (!target) return null;
+
+        // Step 1: Try to map skeletal bone animations
+        if (skeleton) {
+          // Try exact match first
+          let boneIdx = skeleton.getBoneIndexByName(target.name);
+
+          // If not found, try normalized name (strip prefixes)
+          if (boneIdx === -1) {
+            const normalizedName = normalizeBoneName(target.name);
+            if (normalizedName !== target.name) {
+              boneIdx = skeleton.getBoneIndexByName(normalizedName);
+            }
+          }
+
+          if (boneIdx !== -1) {
+            const targetBone = skeleton.bones[boneIdx];
+            // Never let a clip drive the coordinate-space correction bone.
+            if (targetBone && ROOT_BONE_NAMES.has((targetBone.name || '').toLowerCase())) {
+              rootSkipped++;
+              return null;
+            }
+            if (targetBone && targetBone._linkedTransformNode) {
+              boneMatches++;
+              return targetBone._linkedTransformNode;
+            }
+          }
+        }
+
+        // Step 2: Map morph target (blendshape) animations
+        if (morphTargetManagers.length > 0) {
+          if (morphName !== target.name) {
+            curMTM = 0;
+            morphName = target.name;
+          }
+
+          if (curMTM < morphTargetManagers.length) {
+            morphIndex = getMorphTargetIndex(morphTargetManagers[curMTM], target.name);
+
+            if (morphIndex !== -1) {
+              mtm = morphTargetManagers[curMTM].getTarget(morphIndex);
+              curMTM++;
+              morphMatches++;
+              return mtm;
+            }
+          }
+        }
+
+        noMatches++;
+        return null; // no match — skip it (never add a null-target animation)
+      };
+
+      // Build the retargeted group manually so unmatched targets are dropped
+      // rather than added with a null target.
+      const clonedAnimGroup = new BABYLON.AnimationGroup(cloneName, scene);
+      animGroup.targetedAnimations.forEach((ta) => {
+        if (!ta.animation) return;
+        const newTarget = resolveTarget(ta.target);
+        if (!newTarget) return;
+
+        const anim = ta.animation.clone();
+        // CC skeleton is in centimetres but FBX→GLB animations export positions in metres,
+        // so scale position keys by POS_SCALE (rotation/morph keys are unaffected).
+        if (anim.targetProperty === "position" && POS_SCALE !== 1) {
+          anim.setKeys(anim.getKeys().map(k => {
+            const v = k.value;
+            return (v && v.x !== undefined)
+              ? { frame: k.frame, value: new BABYLON.Vector3(v.x * POS_SCALE, v.y * POS_SCALE, v.z * POS_SCALE) }
+              : k;
+          }));
+        }
+        clonedAnimGroup.addTargetedAnimation(anim, newTarget);
+      });
+
+      console.log(`Retarget complete: ${boneMatches} bone matches, ${morphMatches} morph matches, ${noMatches} no matches, ${rootSkipped} root channels skipped, ${clonedAnimGroup.targetedAnimations.length} added`);
+
+      clonedAnimGroup.name = cloneName;
+      return clonedAnimGroup;
+    }
+
+    // Load base character mesh (skeleton + morph targets)
+    async function loadBaseCharacter() {
+      zinDisplayElement.textContent = 'Loading base character...';
+
+      try {
+        const loadedResults = await BABYLON.SceneLoader.ImportMeshAsync(
+          null,
+          BASE_CHARACTER_URL,
+          "",
+          scene
+        );
+
+        character = loadedResults;
+        skeleton = loadedResults.skeletons[0];
+
+        // Wrap the imported top-level nodes under a single root TransformNode so the
+        // camera-focus, hand-follow and orientation-snap helpers have something to target
+        // (mirrors BabylonCC loadAvatar.ts). We KEEP the CC avatar's 0.01 root scaling
+        // (it renders at ~metre scale, matching this tool's camera); position animations
+        // are scaled by POS_SCALE during retargeting to compensate. Do NOT rescale to 1.0.
+        avatarRoot = new BABYLON.TransformNode("Avatar", scene);
+        const importedNodes = [...loadedResults.transformNodes, ...loadedResults.meshes];
+        const importedSet = new Set(importedNodes);
+        importedNodes
+          .filter(n => n !== avatarRoot && (!n.parent || !importedSet.has(n.parent)))
+          .forEach(n => { n.parent = avatarRoot; });
+
+
+        // CC avatar handling (mirrors babyloncc/dist): hide helper meshes and tune
+        // materials via the ported AVATAR_MATERIAL_CONFIG / AVATAR_MATERIAL_RULES.
+        const RULES = AVATAR_MATERIAL_RULES;
+        loadedResults.meshes.forEach(mesh => {
+          mesh.alwaysSelectAsActiveMesh = true;
+
+          // Hide CC helper meshes that should never render (eye occlusion, tear line, ...)
+          const lower = mesh.name.toLowerCase();
+          if (EXCLUDED.some(ex => lower.includes(ex.toLowerCase()))) {
+            mesh.setEnabled(false);
+            return;
+          }
+
+          const mat = mesh.material;
+          if (!mat) return;
+          const name = (mesh.name + " " + mat.name).toLowerCase();
+
+          // Base studio material tuning
+          mat.specularIntensity = AVATAR_MATERIAL_CONFIG.specularIntensity;
+          mat.environmentIntensity = AVATAR_MATERIAL_CONFIG.environmentIntensity;
+          mat.roughness = AVATAR_MATERIAL_CONFIG.roughness;
+          mat.metallic = AVATAR_MATERIAL_CONFIG.metallic;
+
+          const alphaBlendRule = RULES.alphaBlendRules.find(r => r.nameIncludes.some(t => name.includes(t)));
+          const roughnessRule = RULES.roughnessOverrides.find(r => r.nameIncludes.some(t => name.includes(t)));
+
+          if (alphaBlendRule) {
+            if (typeof alphaBlendRule.backFaceCulling === "boolean") mat.backFaceCulling = alphaBlendRule.backFaceCulling;
+            if (typeof alphaBlendRule.renderingGroupId === "number") mesh.renderingGroupId = alphaBlendRule.renderingGroupId;
+            mat.transparencyMode = BABYLON.PBRMaterial.PBRMATERIAL_ALPHABLEND;
+          } else if (roughnessRule) {
+            mat.roughness = Math.max(mat.roughness, roughnessRule.minimumRoughness);
+          } else if (RULES.scalp.nameIncludes.some(t => name.includes(t))) {
+            mesh.renderingGroupId = RULES.scalp.renderingGroupId;
+            mesh.alphaIndex = RULES.scalp.alphaIndex;
+          } else if (RULES.opaqueFallback) {
+            mat.transparencyMode = BABYLON.PBRMaterial.PBRMATERIAL_OPAQUE;
+          }
+        });
+
+        // Register visible avatar meshes as shadow casters for the studio lights
+        if (lightingRig) {
+          loadedResults.meshes.forEach(mesh => {
+            if (mesh.isEnabled() && mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
+              lightingRig.addShadowCaster(mesh);
+            }
+          });
+        }
+
+        // Extract morph target managers (for facial animations)
+        morphTargetManagers = loadedResults.meshes
+          .filter(mesh => mesh.morphTargetManager)
+          .map(mesh => mesh.morphTargetManager);
+
+        console.log("=== Base Character Loaded ===");
+        console.log("Skeleton bones:", skeleton ? skeleton.bones.length : 0);
+        console.log("Morph target managers:", morphTargetManagers.length);
+
+        // Verify linkedTransformNode setup
+        if (skeleton) {
+          const bonesWithLinks = skeleton.bones.filter(b => b._linkedTransformNode).length;
+          console.log(`Bones with linkedTransformNode: ${bonesWithLinks}/${skeleton.bones.length}`);
+          if (bonesWithLinks > 0) {
+            console.log("First bone with linkedTransformNode:",
+              skeleton.bones.find(b => b._linkedTransformNode)?.name);
+          }
+        }
+
+        // Frame the camera on the avatar's spine bone (BabylonCC camera-focus config),
+        // then rotate the avatar so its eyes actually face that camera, then re-frame.
+        focusCameraOnAvatar(scene, avatarRoot);
+        orientAvatarEyesToCamera(scene, avatarRoot);
+        // Optional manual fine-tune on top of the automatic eye-facing (default 0).
+        if (AVATAR_CAMERA_CONFIG.facingYDegrees) {
+          avatarRoot.rotate(BABYLON.Axis.Y, BABYLON.Tools.ToRadians(AVATAR_CAMERA_CONFIG.facingYDegrees), BABYLON.Space.WORLD);
+        }
+        focusCameraOnAvatar(scene, avatarRoot);
+
+        baseCharacterLoaded = true;
+        zinDisplayElement.textContent = 'Base character loaded. Load an animation GLB...';
+
+      } catch (error) {
+        console.error("Error loading base character:", error);
+        zinDisplayElement.textContent = 'Error loading base character: ' + error.message;
+        baseCharacterLoaded = false;
+      }
+    }
+
+    // ============================================
+    // ============================================
+    // FBXtoGLBCompression PIPELINE SUPPORT
+    // ============================================
+    // The new pipeline (github.com/J-Andersen-UvA/FBXtoGLBCompression) differs
+    // from the legacy fbx2gltf output in two ways that matter here:
+    //   1. Bone positions are in centimetres, not metres (see POS_SCALE above).
+    //   2. Facial animation is NOT in the GLB. convert_animation.py exports with
+    //      export_morph=False, and the shape keys live in a sidecar
+    //      <name>_shapekeys.json produced by fbx_to_shapekeys.py.
+    // Everything below bridges those two differences.
+
+    // Inspect the source animation's translation keys to decide whether the GLB
+    // is authored in metres or centimetres.
+    function detectPosScale(animGroup) {
+      const override = new URLSearchParams(window.location.search).get('posScale');
+      if (override !== null && override !== '') {
+        const forced = parseFloat(override);
+        if (!isNaN(forced)) {
+          console.log(`[units] POS_SCALE forced to ${forced} via ?posScale=`);
+          return forced;
+        }
+      }
+
+      let maxAbs = 0;
+      for (const ta of animGroup.targetedAnimations) {
+        if (!ta.animation || ta.animation.targetProperty !== 'position') continue;
+        for (const k of ta.animation.getKeys()) {
+          const v = k.value;
+          if (!v || v.x === undefined) continue;
+          maxAbs = Math.max(maxAbs, Math.abs(v.x), Math.abs(v.y), Math.abs(v.z));
+        }
+      }
+
+      const cm = maxAbs > CM_DETECT_THRESHOLD;
+      console.log(`[units] max |translation| key = ${maxAbs.toFixed(3)} -> ` +
+                  `${cm ? 'CENTIMETRES (FBXtoGLBCompression)' : 'METRES (legacy fbx2gltf)'}`);
+      return cm ? POS_SCALE_CM : POS_SCALE_METRES;
+    }
+
+    // Sidecar path for a given animation GLB: foo_anim.glb -> foo_shapekeys.json
+    function shapekeysUrlFor(glbPath) {
+      return glbPath.replace(/_anim\.glb$/i, '_shapekeys.json')
+                    .replace(/\.glb$/i, '_shapekeys.json');
+    }
+
+    // Fetch the sidecar. Returns null when there isn't one (legacy GLBs), which
+    // is not an error - those carry their morph animation inside the GLB.
+    async function fetchShapekeys(glbPath) {
+      const url = shapekeysUrlFor(glbPath);
+      if (url === glbPath) return null;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          console.log(`[shapekeys] no sidecar at ${url} (${res.status}) - using in-GLB morphs if present`);
+          return null;
+        }
+        const data = await res.json();
+        if (!data || !Array.isArray(data.shapeKeys) || !Array.isArray(data.animation)) {
+          console.warn('[shapekeys] sidecar has unexpected shape, ignoring:', url);
+          return null;
+        }
+        console.log(`[shapekeys] loaded ${url}: ${data.shapeKeys.length} targets, ` +
+                    `${data.animation.length} frames @ ${data.fps} fps`);
+        return data;
+      } catch (err) {
+        console.warn('[shapekeys] fetch failed:', url, err);
+        return null;
+      }
+    }
+
+    // Build morph-target animations from the sidecar and append them to the
+    // retargeted group, so the existing timeline/scrub/play controls drive them.
+    //
+    // Frames are mapped proportionally onto the retargeted group's own frame
+    // range rather than assumed to share its numbering: the GLB and the JSON
+    // come from the same FBX and cover the same clip, but Babylon's glTF loader
+    // picks its own frame numbering, so proportional mapping is the reliable
+    // way to line them up.
+    function applyShapekeysToGroup(animGroup, data, from, to) {
+      if (!animGroup || !data || !morphTargetManagers.length) return 0;
+
+      const frames = data.animation;
+      if (frames.length < 2) {
+        console.warn('[shapekeys] fewer than 2 frames, skipping');
+        return 0;
+      }
+
+      if (!(to > from)) {
+        console.warn(`[shapekeys] group has no frame range (${from}..${to}), skipping`);
+        return 0;
+      }
+      const span = to - from;
+      const lastIdx = frames.length - 1;
+
+      // name -> [{frame, value}], filling absent (sparse) weights with 0
+      const curves = new Map();
+      for (const name of data.shapeKeys) curves.set(name, []);
+      frames.forEach((f, i) => {
+        const frame = from + (i / lastIdx) * span;
+        const weights = f.weights || {};
+        for (const name of data.shapeKeys) {
+          curves.get(name).push({ frame, value: weights[name] || 0 });
+        }
+      });
+
+      // Drop curves that never leave zero - no point animating them.
+      let added = 0, skipped = 0, unmatched = 0;
+      const fps = data.fps || 24;
+
+      for (const [name, keys] of curves) {
+        if (!keys.some(k => k.value !== 0)) { skipped++; continue; }
+
+        // Apply to every mesh that owns this morph target (body, eyes, teeth,
+        // tongue, brows...) so the whole face moves together.
+        let matchedAny = false;
+        for (const mtm of morphTargetManagers) {
+          const idx = getMorphTargetIndex(mtm, name);
+          if (idx === -1) continue;
+          matchedAny = true;
+
+          const anim = new BABYLON.Animation(
+            `shapekey_${name}_${added}`,
+            'influence',
+            fps,
+            BABYLON.Animation.ANIMATIONTYPE_FLOAT,
+            BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT
+          );
+          anim.setKeys(keys.map(k => ({ frame: k.frame, value: k.value })));
+          animGroup.addTargetedAnimation(anim, mtm.getTarget(idx));
+          added++;
+        }
+        if (!matchedAny) unmatched++;
+      }
+
+      console.log(`[shapekeys] added ${added} morph animations ` +
+                  `(${skipped} all-zero skipped, ${unmatched} not on avatar), ` +
+                  `mapped onto frames ${from.toFixed(1)}..${to.toFixed(1)}`);
+      return added;
+    }
+
+    // ANIMATION GLB LOADING (with retargeting)
+    // ============================================
+    // ===== END COPIED FROM 3DAnn3 =====
+
+    // Viewer-only: load + retarget the capture GLB (the loading half of 3DAnn3's
+    // loadAnimationGLB, without the annotation timeline).
+    async function loadCaptureAnimation(glbPath) {
+      zinDisplayElement.textContent = 'Loading animation...';
+      const importResult = await BABYLON.SceneLoader.ImportAnimationsAsync(
+        "", glbPath, scene, false, BABYLON.SceneLoaderAnimationGroupLoadingMode.NoSync);
+      const animGroups = importResult.animationGroups || scene.animationGroups;
+      let sourceAnimation = null;
+      for (let i = animGroups.length - 1; i >= 0; i--) {
+        if (animGroups[i].name === "Unreal Take") { sourceAnimation = animGroups[i]; break; }
+      }
+      if (!sourceAnimation && animGroups.length > 0) sourceAnimation = animGroups[animGroups.length - 1];
+      if (!sourceAnimation) throw new Error('No animation found in GLB');
+
+      POS_SCALE = detectPosScale(sourceAnimation);
+      const animName = glbPath.split('/').pop().replace('.glb', '');
+      currentAnimationGroup = retargetAnimWithBlendshapes(sourceAnimation, animName);
+      sourceAnimation.dispose();
+
+      animationFromFrame = currentAnimationGroup.from;
+      animationToFrame = currentAnimationGroup.to;
+      const firstAnim = currentAnimationGroup.targetedAnimations.find(ta => ta.animation);
+      if (firstAnim && firstAnim.animation.framePerSecond) {
+        animationFrameRate = firstAnim.animation.framePerSecond;
+      }
+      if (animationFromFrame === 0 && animationToFrame === 0) {
+        animationFromFrame = Infinity;
+        currentAnimationGroup.targetedAnimations.forEach(ta => {
+          const keys = ta.animation && ta.animation.getKeys();
+          if (keys && keys.length > 1) {
+            animationFromFrame = Math.min(animationFromFrame, keys[0].frame);
+            animationToFrame = Math.max(animationToFrame, keys[keys.length - 1].frame);
+          }
+        });
+        if (animationFromFrame === Infinity) animationFromFrame = 0;
+      }
+
+      const shapekeyData = await fetchShapekeys(glbPath);
+      if (shapekeyData) {
+        applyShapekeysToGroup(currentAnimationGroup, shapekeyData, animationFromFrame, animationToFrame);
+      }
+      currentAnimationGroup.stop();
+      currentAnimationGroup.goToFrame(animationFromFrame);
+      return animName;
+    }
+
+    // ---- Playback controls ----
+    const playBtn = document.getElementById('playBtn');
+    const seek = document.getElementById('seek');
+    const timeLabel = document.getElementById('time');
+    let playing = false;
+
+    function currentFrame() {
+      const a = currentAnimationGroup && currentAnimationGroup.animatables[0];
+      return a ? a.masterFrame : animationFromFrame;
+    }
+    function updateTimeUi() {
+      if (!currentAnimationGroup) return;
+      const span = Math.max(animationToFrame - animationFromFrame, 1);
+      const f = playing ? currentFrame() : animationFromFrame + (seek.value / 1000) * span;
+      if (playing) seek.value = Math.round(((f - animationFromFrame) / span) * 1000);
+      timeLabel.textContent = ((f - animationFromFrame) / animationFrameRate).toFixed(2) +
+        ' / ' + (span / animationFrameRate).toFixed(2);
+    }
+    playBtn.addEventListener('click', () => {
+      if (!currentAnimationGroup) return;
+      if (playing) {
+        currentAnimationGroup.pause();
+        playing = false;
+        playBtn.textContent = 'Play';
+      } else {
+        const span = Math.max(animationToFrame - animationFromFrame, 1);
+        const start = animationFromFrame + (seek.value / 1000) * span;
+        currentAnimationGroup.start(true, 1.0, animationFromFrame, animationToFrame);
+        currentAnimationGroup.goToFrame(start >= animationToFrame ? animationFromFrame : start);
+        playing = true;
+        playBtn.textContent = 'Pauze';
+      }
+    });
+    seek.addEventListener('input', () => {
+      if (!currentAnimationGroup) return;
+      const span = Math.max(animationToFrame - animationFromFrame, 1);
+      const frame = animationFromFrame + (seek.value / 1000) * span;
+      if (!playing) currentAnimationGroup.start(false, 1.0, animationFromFrame, animationToFrame);
+      currentAnimationGroup.goToFrame(frame);
+      if (!playing) currentAnimationGroup.pause();
+      updateTimeUi();
+    });
+    function toggleHand(side, btn) {
+      trackedHand = trackedHand === side ? null : side;
+      document.getElementById('leftHandBtn').style.outline = trackedHand === 'left' ? '2px solid #fff' : '';
+      document.getElementById('rightHandBtn').style.outline = trackedHand === 'right' ? '2px solid #fff' : '';
+      if (!trackedHand) focusCameraOnAvatar(scene, avatarRoot);
+    }
+    document.getElementById('leftHandBtn').addEventListener('click', () => toggleHand('left'));
+    document.getElementById('rightHandBtn').addEventListener('click', () => toggleHand('right'));
+
+    // ---- Init ----
+    (async function () {
+      await initializeBabylonScene();
+      try { await loadBackdrop(scene); } catch (err) { console.warn('[Backdrop] failed to load:', err); }
+      await loadBaseCharacter();
+      if (!baseCharacterLoaded) return;
+      scene.onBeforeRenderObservable.add(updateTimeUi);
+
+      const params = new URLSearchParams(window.location.search);
+      let glbUrl = params.get('glb');
+      let label = params.get('file') || '';
+      try {
+        if (!glbUrl) {
+          const q = params.get('capture_id')
+            ? 'capture_id=' + encodeURIComponent(params.get('capture_id'))
+            : 'file=' + encodeURIComponent(label);
+          const res = await fetch('api/get_capture_glb.php?' + q);
+          const data = await res.json();
+          if (!data.success) throw new Error(data.error || 'lookup failed');
+          if (!data.glb_url) throw new Error('No GLB for ' + data.recording_dir);
+          glbUrl = data.glb_url;
+          label = data.recording_dir;
+        }
+        const animName = await loadCaptureAnimation(glbUrl);
+        document.title = (label || animName) + ' - 3D Viewer';
+        zinDisplayElement.textContent = label || animName;
+        [playBtn, seek, document.getElementById('leftHandBtn'), document.getElementById('rightHandBtn')]
+          .forEach(el => { el.disabled = false; });
+        updateTimeUi();
+      } catch (err) {
+        console.error('Error loading capture:', err);
+        zinDisplayElement.textContent = 'Kan animatie niet laden: ' + err.message;
+      }
+    })();
+  </script>
+</body>
+</html>
