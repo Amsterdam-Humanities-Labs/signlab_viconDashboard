@@ -1,28 +1,29 @@
 # signlab_viconDashboard
-Live dashboard for Vicon capture sessions: which captures arrived, whether their files are complete, download links.
+A live dashboard for Vicon recording sessions. It shows which recordings arrived, whether their files are complete, and download links.
 
 ## What it does
-- `index.html` (refreshes every 30 s): last 100 captures or one date, date sidebar, mocap pie chart, Tekst column.
-- Row colour: green = all of `obs`, `shogun_live`, `unreal`, `livelink`, `metadata` present and nothing growing; yellow = still growing; red = missing subdir.
-- `livelink` is derived from CSVs in `unreal`. Files that stay on the Vicon PC show as present but have no download link.
-- Read-only JSON: `api/get_live_feed.php`, `get_capture_files.php`, `get_date_overview.php`, `get_mocap_stats.php`.
-- Details for code changes: `CLAUDE.md`.
+- `index.html` refreshes every 30 seconds. It shows the last 100 recordings or one date, the last 30 recording dates, a mocap pie chart and a Tekst column.
+- Row colours: green when `obs`, `shogun_live`, `unreal`, `livelink` and `metadata` are all present and no file is still growing. Yellow when all five are present but files are still growing. Red when one is missing. `shogun_post`, GLB and the `unreal/CC` and `unreal/Vicon` columns (from 2026-02-17) are shown but do not change the colour.
+- `livelink` counts as present when `unreal` holds its CSVs. Files that stay on the Vicon PC show as present but have no download link.
+- Read-only JSON in `api/`: `get_live_feed.php`, `get_capture_files.php`, `get_date_overview.php`, `get_mocap_stats.php`.
+- Read `CLAUDE.md` before you change the code.
 
 ## Where it runs
-core (production): `/web/viconDashboard`, https://signcollect.nl/viconDashboard/. Demo: dev2 `/web/viconDashboard`, dev-1 `/srv/signcollect/web/viconDashboard`.
+Core server: `/web/viconDashboard`, https://signcollect.nl/viconDashboard/.
+Demo hosts: dev2 `/web/viconDashboard`, dev-1 `/srv/signcollect/web/viconDashboard`.
 
 ## Status
-production
+Production.
 
 ## How to run / deploy
-Deployed by the stack (repos.tsv row `viconDashboard`): https://github.com/Amsterdam-Humanities-Labs/signlab_signcollect-stack
-No build step; Bootstrap 5 and Chart.js load from CDNs.
+[signlab_signcollect-stack](https://github.com/Amsterdam-Humanities-Labs/signlab_signcollect-stack) deploys it (`repos.tsv` row `viconDashboard`).
+There is no build step. Bootstrap 5 and Chart.js load from CDNs.
 
 ## Configuration
-- `mysql_config.php` (not in git) at the docroot, found via `sc_path()`.
-- Vendored `sc_paths.php` (edit it in signcollect-lib, not here).
+- `mysql_config.php` (not in git) at the docroot. The code finds it with `sc_path()`.
+- `sc_paths.php` is copied from signcollect-lib; edit it there, not here.
 
 ## Dependencies
-- MySQL `admin_gebarenoverleg`: `vicon_captures`, `vicon_files` (written by signlab_viconSync), `matched_transcriptions`, `sentences`.
-- `/mnt/bigstorage/` via `gebarenoverleg_media/` symlinks for downloads; `/userProtect.js` at the docroot.
-- The Tekst link targets `/sCApp/3DViewer_viconDashboard.html`, which is in no repo (404 on prod and demo).
+- MySQL `admin_gebarenoverleg`: `vicon_captures` and `vicon_files` (written by [signlab_viconSync](https://github.com/Amsterdam-Humanities-Labs/signlab_viconSync)), `matched_transcriptions`, `sentences`.
+- Downloads go through the `gebarenoverleg_media/` symlinks to `/mnt/bigstorage/`. `/userProtect.js` must be at the docroot.
+- The Tekst link points to `/sCApp/3DViewer_viconDashboard.html`. No repo contains that file, so it returns 404 on production and on demo hosts.
