@@ -26,3 +26,10 @@ There is no build step. Bootstrap 5 and Chart.js load from CDNs.
 - MySQL `admin_gebarenoverleg`: `vicon_captures` and `vicon_files` (written by [signlab_viconSync](https://github.com/Amsterdam-Humanities-Labs/signlab_viconSync)), `matched_transcriptions`, `sentences`.
 - Downloads go through the `gebarenoverleg_media/` symlinks to `/mnt/bigstorage/`. `/userProtect.js` must be at the docroot.
 - The Tekst link opens `3d-viewer.html?capture_id=…`: the capture GLB (cc_pipeline `_anim.glb` if present, via `api/get_capture_glb.php`) on the Babylon CC avatar from `/animMIDI/babyloncc/dist/` (same scene code as annotation-editors 3DAnn3).
+
+## License and citation
+
+Apache License 2.0, copyright University of Amsterdam: see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). You may use it, also commercially, as long as you credit
+Gomer Otterspeer / University of Amsterdam as the source. To cite it, use
+[CITATION.cff](CITATION.cff) (the *Cite this repository* button on GitHub) or the DOI [10.21942/uva.33980395](https://doi.org/10.21942/uva.33980395).
